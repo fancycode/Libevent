@@ -26,6 +26,59 @@
 #include <event2/buffer.h>
 #include <event2/util.h>
 
+char uri_root[512];
+
+static const struct table_entry {
+	const char *extension;
+	const char *content_type;
+} content_type_table[] = {
+	{ "txt", "text/plain" },
+	{ "c", "text/plain" },
+	{ "h", "text/plain" },
+	{ "html", "text/html" },
+	{ "htm", "text/htm" },
+	{ "css", "text/css" },
+	{ "gif", "image/gif" },
+	{ "jpg", "image/jpeg" },
+	{ "jpeg", "image/jpeg" },
+	{ "png", "image/png" },
+	{ "pdf", "application/pdf" },
+	{ "ps", "application/postsript" },
+	{ NULL, NULL },
+};
+
+static const char *
+guess_content_type(const char *path)
+{
+	const char *last_period, *extension;
+	const struct table_entry *ent;
+	last_period = strrchr(path, '.');
+	if (!last_period || strchr(last_period, '/'))
+		goto not_found;
+	extension = last_period + 1;
+	printf("Extension is <%s>\n", extension);
+	for (ent = &content_type_table[0]; ent->extension; ++ent) {
+		if (!evutil_ascii_strcasecmp(ent->extension, extension))
+			return ent->content_type;
+	}
+
+not_found:
+	return "application/misc";
+}
+
+static void
+dump_request_info(struct evhttp_request *req, void *arg)
+{
+	const char *reqtype;
+
+	
+
+}
+
+/* This callback gets invoked when we get any http request that doesn't match
+ * any other callback.  Like any evhttp server callback, it has a simple job:
+ * it must eventually call evhttp_send_error() or evhttp_send_reply().
+ */
 static void
 send_document_cb(struct evhttp_request *req, void *arg)
 {
@@ -43,8 +96,7 @@ send_document_cb(struct evhttp_request *req, void *arg)
 	printf("Got request for <%s>\n",  uri);
 
 	if (evhttp_request_get_command(req) != EVHTTP_REQ_GET) {
-		printf("It wasn't a GET request. Sending ???\n");
-		evhttp_send_error(req, 404, "Not the right error");
+		dump_request_info(req, arg);
 		return;
 	}
 
@@ -52,51 +104,83 @@ send_document_cb(struct evhttp_request *req, void *arg)
 	decoded = evhttp_uri_parse(uri);
 	if (!decoded) {
 		printf("It's not a good URI. Sending ???\n");
-		evhttp_send_error(req, 404, "Not the right error");
+		evhttp_send_error(req, HTTP_BADREQUEST, 0);
 		return;
 	}
 
+	/* Let's see what path the user asked for. */
 	path = evhttp_uri_get_path(decoded);
-	if (!path) path = "";
+	if (!path) path = "/";
 
+	/* We need to decode it, to see what path the user really wanted. */
 	decoded_path = evhttp_uridecode(path, 0, NULL);
-	if (strstr(decoded_path, "..")) /*XXX overzealous */
+	/* Don't allow any ".."s in the path, to avoid exposing stuff outside
+	 * of the docroot.  This test is both overzealous and underzealous:
+	 * it forbids aceptable paths like "/this/one..here", but it doesn't
+	 * do anything to prevent symlink following." */
+	if (strstr(decoded_path, ".."))
 		goto err;
 
 	len = strlen(decoded_path)+strlen(docroot)+2;
-	whole_path = malloc(len);
-	snprintf(whole_path, len, "%s/%s", docroot, decoded_path);
+	if (!(whole_path = malloc(len))) {
+		perror("malloc");
+		goto err;
+	}
+	evutil_snprintf(whole_path, len, "%s/%s", docroot, decoded_path);
 
-	fd = open(whole_path, O_RDONLY);
-	if (fd<0) {
+	if (stat(whole_path, &st)<0) {
+		perror("stat");
 		goto err;
 	}
 
-	if (fstat(fd, &st)<0) {
-		goto err;
-	}
-
+	/* This holds the content we're sending */
 	evb = evbuffer_new();
 	if (S_ISDIR(st.st_mode)) {
 		DIR *d;
 		struct dirent *ent;
-		d = fdopendir(fd);
-		if (!d)
+		const char *trailing_slash = "";
+
+		if (!strlen(path) || path[strlen(path)-1] != '/')
+			trailing_slash = "/";
+
+		if (!(d = opendir(whole_path)))
 			goto err;
-		/*XXX set relative-paths right; make . and .. work. */
-		evbuffer_add_printf(evb, "<html><body><h1>%s</h1><ul>\n",
-		    decoded_path);/*html escape.XXXX*/
+		close(fd);
+
+		evbuffer_add_printf(evb, "<html>\n <head>\n"
+		    "  <title>%s</title>\n"
+		    "  <base href='%s%s%s'>\n"
+		    " </head>\n"
+		    " <body>\n"
+		    "  <h1>%s</h1>\n"
+		    "  <ul>\n",
+		    decoded_path, /* XXX html-escape this. */
+		    uri_root, path, /* XXX html-escape this? */
+		    trailing_slash,
+		    decoded_path /* XXX html-escape this */);
 		while ((ent = readdir(d))) {
-			evbuffer_add_printf(evb,"<li><a href=\"./%s\">%s</a>\n",
-			    ent->d_name, ent->d_name);
+			evbuffer_add_printf(evb,
+			    "    <li><a href=\"%s\">%s</a>\n",
+			    ent->d_name, ent->d_name);/* XXX escape this */
 		}
 		evbuffer_add_printf(evb, "</ul></body></html>\n");
 		closedir(d);
-	} else {
-
-		/* XXX not right for everybody */
 		evhttp_add_header(evhttp_request_get_output_headers(req),
-		    "Content-Type", "text/plain");
+		    "Content-Type", "text/html");
+	} else {
+		const char *type = guess_content_type(decoded_path);
+		if ((fd = open(whole_path, O_RDONLY) < 0)) {
+			perror("open");
+			goto err;
+		}
+
+		if (fstat(fd, &st)<0) {
+			/* Make sure it still matches! */
+			perror("fstat");
+			goto err;
+		}
+		evhttp_add_header(evhttp_request_get_output_headers(req),
+		    "Content-Type", type);
 		evbuffer_add_file(evb, fd, 0, st.st_size);
 	}
 
@@ -136,6 +220,10 @@ main(int argc, char **argv)
 	if (signal(SIGPIPE, SIG_IGN) == SIG_ERR)
 		return (1);
 #endif
+	if (argc < 2) {
+		syntax();
+		return 1;
+	}
 
 	base = event_base_new();
 	if (!base) {
@@ -143,19 +231,18 @@ main(int argc, char **argv)
 		return 1;
 	}
 
-	if (argc < 2) {
-		syntax();
-		return 1;
-	}
-
+	/* Create a new evhttp object to handle requests. */
 	http = evhttp_new(base);
 	if (!http) {
 		fprintf(stderr, "couldn't create evhttp. Exiting.\n");
 		return 1;
 	}
 
+	/* We want to accept arbitrary requests, so we need to set a "generic"
+	 * cb.  We can also add callbacks for specific paths. */
 	evhttp_set_gencb(http, send_document_cb, argv[1]);
 
+	/* Now we tell the evhttp what port to listen on */
 	handle = evhttp_bind_socket_with_handle(http, "0.0.0.0", port);
 	if (!handle) {
 		fprintf(stderr, "couldn't bind to port %d. Exiting.\n",
@@ -164,6 +251,7 @@ main(int argc, char **argv)
 	}
 
 	{
+		/* Extract and display the address we're listening on. */
 		struct sockaddr_storage ss;
 		evutil_socket_t fd;
 		ev_socklen_t socklen = sizeof(ss);
@@ -192,6 +280,8 @@ main(int argc, char **argv)
 		    sizeof(addrbuf));
 		if (addr) {
 			printf("Listening on %s:%d\n", addr, got_port);
+			evutil_snprintf(uri_root, sizeof(uri_root),
+			    "http://%s:%d",addr,got_port);
 		} else {
 			fprintf(stderr, "evutil_inet_ntop failed\n");
 			return 1;
