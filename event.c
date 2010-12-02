@@ -1523,7 +1523,8 @@ event_base_loop(struct event_base *base, int flags)
 		}
 
 		/* If we have no events, we just exit */
-		if (!event_haveevents(base) && !N_ACTIVE_CALLBACKS(base)) {
+		if (0==(flags&EVLOOP_EMPTY_OK) &&
+		    !event_haveevents(base) && !N_ACTIVE_CALLBACKS(base)) {
 			event_debug(("%s: no events registered.", __func__));
 			retval = 1;
 			goto done;
