@@ -46,6 +46,17 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include <assert.h>
+#include <errno.h>
+
+#include "event2/util.h"
+#include "event2/event.h"
+#include "event2/event_compat.h"
+#include "event2/buffer.h"
+#include "event2/bufferevent.h"
+
+#include "regress.h"
+
 /* zlib 1.2.4 and 1.2.5 do some "clever" things with macros.  Instead of
    saying "(defined(FOO) ? FOO : 0)" they like to say "FOO-0", on the theory
    that nobody will care if the compile outputs a no-such-identifier warning.
@@ -66,17 +77,7 @@
 #define off64_t ev_int64_t
 #endif
 
-#include <zlib.h>
-#include <assert.h>
-#include <errno.h>
-
-#include "event2/util.h"
-#include "event2/event.h"
-#include "event2/event_compat.h"
-#include "event2/buffer.h"
-#include "event2/bufferevent.h"
-
-#include "regress.h"
+#include zlib.h
 
 static int infilter_calls;
 static int outfilter_calls;
