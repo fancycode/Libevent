@@ -63,7 +63,7 @@
 #define _FILE_OFFSET_BITS 0
 #endif
 #ifndef off64_t
-#define off64_t int64_t
+#define off64_t ev_int64_t
 #endif
 
 #include <zlib.h>
